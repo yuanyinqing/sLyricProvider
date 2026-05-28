@@ -88,6 +88,9 @@ object QQMusic : YukiBaseHooker() {
             onAppLifecycle {
                 onCreate {
                     registerPlayerReadyReceiver(this)
+                    // 主进程启动时也主动推送一次快照
+                    // 处理主进程被系统杀死重启、而 PlayerService 仍在运行的边缘情况
+                    sendSettingsSnapshot(this)
                 }
             }
         }
@@ -98,6 +101,20 @@ object QQMusic : YukiBaseHooker() {
          * 立即把当前 SharedPreferences 里的真实值以 ACTION_SETTINGS_SNAPSHOT
          * 广播回 PlayerService，彻底替代跨进程直读 prefs 的方案。
          */
+        private fun sendSettingsSnapshot(application: Application) {
+            val prefs = application.getSharedPreferences(PREF_NAME_QQMUSIC, Context.MODE_PRIVATE)
+            val trans = prefs.getBoolean(KEY_DISPLAY_TRANS, false)
+            val roma  = prefs.getBoolean(KEY_DISPLAY_ROMA, false)
+
+            val snapshot = Intent(ACTION_SETTINGS_SNAPSHOT).apply {
+                putExtra(KEY_DISPLAY_TRANS, trans)
+                putExtra(KEY_DISPLAY_ROMA, roma)
+                setPackage(application.packageName)
+            }
+            application.sendBroadcast(snapshot)
+            Log.d(TAG, "Host process started, pushed settings snapshot: trans=$trans roma=$roma")
+        }
+
         private fun registerPlayerReadyReceiver(application: Application) {
             val filter = IntentFilter(ACTION_PLAYER_READY)
             ContextCompat.registerReceiver(application, object : BroadcastReceiver() {
