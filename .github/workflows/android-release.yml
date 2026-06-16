@@ -42,15 +42,10 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
           cache-disabled: false
 
-      - name: Decode Keystore (Release)
-        if: env.BUILD_TYPE == 'release'
+      - name: Decode Keystore
+        if: ${{ github.event.inputs.build-type == 'release' || env.BUILD_TYPE == 'release' }}
         run: |
           echo "${{ secrets.SIGNING_KEY }}" | base64 -d > release.jks
-
-      - name: Decode Keystore (Debug)
-        if: env.BUILD_TYPE == 'debug'
-        run: |
-          echo "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" | base64 -d > release.jks
 
       - name: Build APKs with Caching
         run: |
@@ -61,9 +56,9 @@ jobs:
           fi
         env:
           RELEASE_STORE_FILE: ../release.jks
-          RELEASE_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD || 'android' }}
-          RELEASE_KEY_ALIAS: ${{ secrets.ALIAS || 'debug' }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'android' }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Collect APKs to flat directory
         run: |
