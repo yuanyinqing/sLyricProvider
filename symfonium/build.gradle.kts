@@ -21,8 +21,8 @@ configure<ApplicationExtension> {
         applicationId = "io.github.proify.lyricon.symfoniumprovider"
         minSdk = 27
         targetSdk = rootProject.extra.get("targetSdkVersion") as Int
-        versionCode = 8
-        versionName = "1.0.8"
+        versionCode = 9
+        versionName = "1.0.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -61,6 +61,7 @@ configure<ApplicationExtension> {
 }
 
 dependencies {
+    implementation(project(":share:cloudlyric"))
     implementation(project(":share:extensions-android"))
     implementation(project(":share:lrckit"))
     implementation(project(":share:krckit"))
