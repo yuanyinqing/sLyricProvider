@@ -61,7 +61,6 @@ configure<ApplicationExtension> {
 }
 
 dependencies {
-    implementation(project(":share:cloudlyric"))
     implementation(project(":share:extensions-android"))
     implementation(project(":share:lrckit"))
     implementation(project(":share:krckit"))

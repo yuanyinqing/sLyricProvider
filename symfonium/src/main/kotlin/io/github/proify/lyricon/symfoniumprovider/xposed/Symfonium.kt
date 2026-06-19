@@ -122,7 +122,7 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         duration: Long,
         mediaId: String?
     ) {
-        // 先发送基础歌曲信息（清除旧歌词），参考 PowerAmp
+        // 先发送基础歌曲信息（清除旧歌词）
         updateSong(Song(name = title, artist = artist, duration = duration, id = mediaId))
 
         // 尝试通过 mediaId 解析 URI 并读取内嵌歌词
@@ -139,13 +139,9 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
                     )
                     updateSong(song)
                     YLog.info(tag = tag, msg = "Local lyric loaded: $title")
-                    return
                 }
             }
         }
-
-        // 本地歌词未找到, 尝试网络搜索
-        searchLyricsOnline(title, artist, duration, mediaId)
     }
 
     // ──────────────────────────────────────────────
@@ -163,35 +159,6 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
     } catch (e: Exception) {
         YLog.error(tag = tag, msg = "TagLib failed: $uri", e = e)
         null
-    }
-
-    // ──────────────────────────────────────────────
-    // 歌词来源 2: 网络搜索 (参考 PowerAmp Downloader)
-    // ──────────────────────────────────────────────
-
-    private fun searchLyricsOnline(title: String, artist: String?, duration: Long, mediaId: String?) {
-        try {
-            Downloader.search(
-                tag = tag,
-                trackName = title,
-                artistName = artist ?: ""
-            ) { results ->
-                scope.launch {
-                    val trackId = mediaId ?: title
-                    if (trackId != currentMediaId) return@launch
-
-                    val richLyrics = results.firstOrNull()?.lyrics?.rich
-                    val song = Song(
-                        id = mediaId, name = title, artist = artist,
-                        duration = duration, lyrics = richLyrics
-                    )
-                    updateSong(song)
-                    YLog.info(tag = tag, msg = "Online lyric loaded: $title")
-                }
-            }
-        } catch (e: Exception) {
-            YLog.error(tag = tag, msg = "Online search failed for: $title", e = e)
-        }
     }
 
     // ──────────────────────────────────────────────
