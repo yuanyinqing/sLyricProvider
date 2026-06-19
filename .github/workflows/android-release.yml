@@ -11,6 +11,11 @@ on:
           - release
         default: debug
         required: true
+      target-module:
+        description: 'Target Module (empty = all)'
+        type: string
+        default: 'symfonium'
+        required: false
 
 jobs:
   build-and-release:
@@ -49,11 +54,14 @@ jobs:
 
       - name: Build APKs with Caching
         run: |
-          if [ "$BUILD_TYPE" = "release" ]; then
-            ./gradlew assembleRelease --build-cache
+          TARGET="${{ github.event.inputs.target-module }}"
+          if [ -n "$TARGET" ]; then
+            TASK=":$TARGET:assemble${BUILD_TYPE^}"
           else
-            ./gradlew assembleDebug --build-cache
+            TASK="assemble${BUILD_TYPE^}"
           fi
+          echo "Building: $TASK"
+          ./gradlew $TASK --build-cache
         env:
           RELEASE_STORE_FILE: ../release.jks
           RELEASE_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
