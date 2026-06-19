@@ -205,17 +205,19 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
     // 歌词来源 1: 音频文件内嵌标签 (ID3 LYRICS frame)
     // ──────────────────────────────────────────────
 
-    private fun fetchLyricFromTag(uri: Uri): String? = try {
-        appContext?.contentResolver?.openFileDescriptor(uri, "r")?.use { pfd ->
-            TagLib.getMetadata(pfd.dup().detachFd())?.let { metadata ->
-                metadata.propertyMap.entries.firstOrNull { (key, _) ->
-                    lyricTagRegex.matches(key)
-                }?.value?.firstOrNull()
+    private fun fetchLyricFromTag(uri: Uri): String? {
+        return try {
+            appContext?.contentResolver?.openFileDescriptor(uri, "r")?.use { pfd ->
+                TagLib.getMetadata(pfd.dup().detachFd())?.let { metadata ->
+                    metadata.propertyMap.entries.firstOrNull { (key, _) ->
+                        lyricTagRegex.matches(key)
+                    }?.value?.firstOrNull()
+                }
             }
+        } catch (e: Exception) {
+            YLog.error(tag = tag, msg = "TagLib failed: $uri", e = e)
+            null
         }
-    } catch (e: Exception) {
-        YLog.error(tag = tag, msg = "TagLib failed: $uri", e = e)
-        null
     }
 
     // ──────────────────────────────────────────────
@@ -229,44 +231,47 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
      * - file:///path/to/music.mp3 → /path/to/music.lrc
      * - content://media/external/audio/media/123 → 通过 MediaStore 反查文件路径
      */
-    private fun fetchLyricFromLrcFile(uri: Uri): String? = try {
-        val audioPath = resolveFilePath(uri) ?: return@try null
-        val lrcFile = File(audioPath.replace(Regex("\\.[^.]+$"), ".lrc"))
-        if (lrcFile.isFile && lrcFile.canRead()) {
-            YLog.debug(tag = tag, msg = "Found LRC file: ${lrcFile.name}")
-            return@try lrcFile.readText()
+    private fun fetchLyricFromLrcFile(uri: Uri): String? {
+        return try {
+            val audioPath = resolveFilePath(uri) ?: return null
+            val lrcFile = File(audioPath.replace(Regex("\\.[^.]+$"), ".lrc"))
+            if (lrcFile.isFile && lrcFile.canRead()) {
+                YLog.debug(tag = tag, msg = "Found LRC file: ${lrcFile.name}")
+                return lrcFile.readText()
+            }
+            null
+        } catch (e: Exception) {
+            YLog.error(tag = tag, msg = "LRC file read failed: $uri", e = e)
+            null
         }
-        null
-    } catch (e: Exception) {
-        YLog.error(tag = tag, msg = "LRC file read failed: $uri", e = e)
-        null
     }
 
     /**
      * 将 Content URI 或 File URI 解析为绝对文件路径.
      */
-    private fun resolveFilePath(uri: Uri): String? = try {
-        when (uri.scheme) {
-            "file" -> uri.path
-            "content" -> {
-                // 尝试通过 DATA column 获取文件路径
-                val cursor = appContext?.contentResolver?.query(
-                    uri,
-                    arrayOf(android.provider.MediaStore.Audio.AudioColumns.DATA),
-                    null, null, null
-                )
-                cursor?.use {
-                    if (it.moveToFirst()) {
-                        val idx = it.getColumnIndexOrThrow(android.provider.MediaStore.Audio.AudioColumns.DATA)
-                        return it.getString(idx)
+    private fun resolveFilePath(uri: Uri): String? {
+        return try {
+            when (uri.scheme) {
+                "file" -> uri.path
+                "content" -> {
+                    val cursor = appContext?.contentResolver?.query(
+                        uri,
+                        arrayOf(android.provider.MediaStore.Audio.AudioColumns.DATA),
+                        null, null, null
+                    )
+                    cursor?.use {
+                        if (it.moveToFirst()) {
+                            val idx = it.getColumnIndexOrThrow(android.provider.MediaStore.Audio.AudioColumns.DATA)
+                            return it.getString(idx)
+                        }
                     }
+                    null
                 }
-                null
+                else -> null
             }
-            else -> null
+        } catch (e: Exception) {
+            null
         }
-    } catch (e: Exception) {
-        null
     }
 
     // ──────────────────────────────────────────────
