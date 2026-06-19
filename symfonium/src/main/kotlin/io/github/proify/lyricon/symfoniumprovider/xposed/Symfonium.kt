@@ -78,19 +78,19 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         try {
             val exoPlayerClass = "androidx.media3.exoplayer.ExoPlayer".toClass().resolve()
             exoPlayerClass.apply {
-                method { name = "setMediaItem" }.hook {
+                firstMethod { name = "setMediaItem" }.hook {
                     after {
                         val mediaItem = args.firstOrNull() ?: return@after
                         processExoPlayerMediaItem(mediaItem)
                     }
                 }
-                method { name = "addMediaItem" }.hook {
+                firstMethod { name = "addMediaItem" }.hook {
                     after {
                         val mediaItem = args.firstOrNull() ?: return@after
                         processExoPlayerMediaItem(mediaItem)
                     }
                 }
-                method { name = "setMediaItems" }.hook {
+                firstMethod { name = "setMediaItems" }.hook {
                     after {
                         val mediaItem = (args.firstOrNull() as? List<*>)?.firstOrNull() ?: return@after
                         processExoPlayerMediaItem(mediaItem)
