@@ -135,7 +135,7 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
                     val song = Song(
                         id = mediaId, name = title, artist = artist,
                         duration = duration,
-                        lyrics = document.lines.filter { !it.text.isNullOrBlank() }
+                        lyrics = document.lines.filter { !it.text.isNullOrBlank() && !isMetaLine(it.text ?: "") }
                     )
                     updateSong(song)
                     YLog.info(tag = tag, msg = "Local lyric loaded: $title")
@@ -164,6 +164,18 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
     // ──────────────────────────────────────────────
     // 工具方法
     // ──────────────────────────────────────────────
+
+    /** 识别歌词元数据行（带时间戳的词曲信息等），避免被当成歌词显示 */
+    private fun isMetaLine(text: String): Boolean {
+        val metaPatterns = listOf(
+            Regex("""^[曲词编和声混音母带制作推广出品宣传统筹发行录音].*[:：]"""),
+            Regex("""版权所有"""),
+            Regex("""未经许可"""),
+            Regex("""^[0-9].*[:：]"""),  // 如 "词：xxx"
+            Regex("""^\s*[-–—].*\s*$"""), // 纯分隔线
+        )
+        return metaPatterns.any { it.containsMatchIn(text.trim()) }
+    }
 
     private fun tryParseUri(mediaId: String?): Uri? {
         if (mediaId.isNullOrBlank()) return null
