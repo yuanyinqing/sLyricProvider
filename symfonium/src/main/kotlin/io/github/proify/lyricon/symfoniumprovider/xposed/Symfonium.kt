@@ -28,11 +28,10 @@ class Symfonium : YukiBaseHooker() {
     private var lyriconProvider: LyriconProvider? = null
     private val lyricTagRegex by lazy { Regex("(?i)\\b(LYRICS)\\b") }
 
-    private var currentMediaUri: Uri? = null
-    private var currentSong: Song? = null
+    // Track the current track identity to deduplicate metadata events
+    private var currentMediaId: String? = null
 
-    // Track the last TITLE to avoid sending duplicate lines back-to-back
-    // (same lyric line can repeat in a song, but consecutive duplicates are noise)
+    // Track the last TITLE sent via sendText() to avoid consecutive dupes
     private var lastSentText: String? = null
 
     override fun onHook() {
@@ -43,25 +42,25 @@ class Symfonium : YukiBaseHooker() {
         AndroidUtils.openBluetoothA2dpOn(appClassLoader)
 
         onAppLifecycle {
-            onCreate {
-                initProvider()
-            }
+            onCreate { initProvider() }
         }
 
         hookMediaSession()
-        hookEmbeddedLyrics()
     }
 
-    // ── Bluetooth-lyrics capture (MediaSession TITLE overwrites) ──────────
-    // Symfonium's "Bluetooth lyrics" switch does NOT expose a separate lyrics
-    // API. Instead it overwrites MediaSession's TITLE field with the current
-    // lyric line on every progression, which gets sent to the car / Bluetooth
-    // screen via AVRCP.  By hooking setMetadata() we intercept every one of
-    // those TITLE updates and forward them as real-time lyric text.
+    // ── MediaSession Hook ─────────────────────────────────────────────────
+    // Two purposes:
+    //  1. When Symfonium's "Bluetooth lyrics" is ON, every setMetadata()
+    //     call carries the *current lyric line* in the TITLE field → capture
+    //     those via sendText() for real-time line-by-line display.
+    //  2. When a new track starts, the mediaId (if it's a content:// URI)
+    //     lets us read an embedded LRC tag from the audio file → deliver
+    //     the full time-synced lyric document via setSong().
     private fun hookMediaSession() {
         "android.media.session.MediaSession".toClass()
             .resolve()
             .apply {
+                // ── Playback state ──────────────────────────────────────
                 firstMethod {
                     name = "setPlaybackState"
                     parameters(PlaybackState::class.java)
@@ -72,88 +71,68 @@ class Symfonium : YukiBaseHooker() {
                     }
                 }
 
+                // ── Metadata (title / artist / mediaId / duration) ──────
                 firstMethod {
                     name = "setMetadata"
                     parameters("android.media.MediaMetadata")
                 }.hook {
                     after {
                         val metadata = args[0] as? MediaMetadata ?: return@after
-
-                        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
-                        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
-                        YLog.debug(tag = TAG, msg = "metadata: $title - $artist")
-
-                        // Forward every TITLE change as a real-time lyric line.
-                        // While Bluetooth lyrics is ON, title IS the current
-                        // lyric line; when OFF, title equals the song name (which
-                        // won't change during playback, so it's sent only once).
-                        if (!title.isNullOrBlank()) {
-                            if (title != lastSentText) {
-                                lastSentText = title
-                                lyriconProvider?.player?.sendText(title)
-                            }
-                        } else {
-                            lyriconProvider?.player?.sendText(null)
-                        }
+                        handleMetadata(metadata)
                     }
                 }
             }
     }
 
-    // ── Embedded-lyrics (local files with LRC tags) ───────────────────────
-    // When Symfonium plays a local file we try to read an embedded LRC tag.
-    // This provides a complete time-synced lyric document that is richer than
-    // the line-by-line TITLE stream.
-    private fun hookEmbeddedLyrics() {
-        Uri::class.java.name.toClass()
-            .resolve()
-            .apply {
-                firstMethod {
-                    name = "parse"
-                    parameters(String::class.java)
-                }.hook {
-                    after {
-                        val uri = args[0] as String
-                        if (!uri.startsWith("content://media/external/audio/")) {
-                            return@after
-                        }
+    private fun handleMetadata(metadata: MediaMetadata) {
+        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
+        val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
+        val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
 
-                        val result = this.result as Uri
-                        if (currentMediaUri == result) {
-                            return@after
-                        }
-                        YLog.debug(tag = TAG, msg = "load uri: $uri")
-                        currentMediaUri = result
+        if (title.isNullOrBlank()) return
 
-                        val lyric = fetchLyricFromTag(result)
-                        setLyric(uri, lyric)
-                    }
-                }
-            }
-    }
-
-    private fun setLyric(id: String, lyric: String?) {
-        val document = EnhanceLrcParser.parse(lyric)
-        // Note: we don't have a MediaMetadata reference here — the song
-        // metadata belongs to the TITLE-capture path.  We still deliver
-        // whatever we can extract from the embedded tag.
-        setSong(
-            Song(
-                id = id,
-                name = null,
-                artist = null,
-                lyrics = document.lines
-            )
-        )
-    }
-
-    private fun setSong(song: Song) {
-        if (currentSong == song) {
-            YLog.debug(tag = TAG, msg = "skip same song: ${song.name}")
-            return
+        // ── Bluetooth-lyrics capture ────────────────────────────────────
+        // While Symfonium's "Bluetooth lyrics" is ON, every TITLE change
+        // IS a lyric line.  We forward it as real-time text.
+        // When the feature is OFF, TITLE stays equal to the song name
+        // (no change → sendText called at most once per track).
+        if (title != lastSentText) {
+            lastSentText = title
+            lyriconProvider?.player?.sendText(title)
         }
-        currentSong = song
+
+        // ── Track-level dedup (setSong path only) ───────────────────────
+        // Use mediaId as the dedup key.  When mediaId is absent (streaming)
+        // we only deliver lyrics via sendText() above — there is no
+        // content URI to read embedded tags from anyway.
+        if (mediaId != null && mediaId == currentMediaId) return
+        currentMediaId = mediaId
+
+        YLog.debug(tag = TAG, msg = "metadata: $title - $artist [id=$mediaId]")
+
+        // ── Attempt embedded LRC via mediaId ────────────────────────────
+        val uri = tryParseUri(mediaId)
+        val rawLyric = if (uri != null) fetchLyricFromTag(uri) else null
+        val document = EnhanceLrcParser.parse(rawLyric, duration)
+
+        val song = Song(
+            id = mediaId ?: title,
+            name = title,
+            artist = artist,
+            duration = duration,
+            lyrics = document.lines
+        )
         lyriconProvider?.player?.setSong(song)
+    }
+
+    // ── Embedded-lyric helpers ────────────────────────────────────────────
+
+    private fun tryParseUri(candidate: String?): Uri? {
+        if (candidate.isNullOrBlank()) return null
+        return try {
+            Uri.parse(candidate)
+        } catch (_: Exception) { null }
     }
 
     private fun fetchLyricFromTag(uri: Uri): String? = try {
@@ -169,6 +148,8 @@ class Symfonium : YukiBaseHooker() {
         null
     }
 
+    // ── Provider lifecycle ────────────────────────────────────────────────
+
     private fun initProvider() {
         val context = appContext ?: return
         lyriconProvider = LyriconFactory.createProvider(
@@ -176,6 +157,9 @@ class Symfonium : YukiBaseHooker() {
             providerPackageName = Constants.PROVIDER_PACKAGE_NAME,
             playerPackageName = context.packageName,
             logo = ProviderLogo.fromSvg(Constants.ICON)
-        ).apply { register() }
+        ).apply {
+            player.setDisplayTranslation(true)
+            register()
+        }
     }
 }
