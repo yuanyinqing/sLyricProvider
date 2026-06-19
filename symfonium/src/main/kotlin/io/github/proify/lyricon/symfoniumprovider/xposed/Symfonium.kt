@@ -7,8 +7,6 @@
 package io.github.proify.lyricon.symfoniumprovider.xposed
 
 import android.content.Context
-import android.media.MediaMetadata
-import android.media.session.PlaybackState
 import android.net.Uri
 import com.highcapable.kavaref.KavaRef.Companion.resolve
 import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
@@ -65,51 +63,76 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
     // ──────────────────────────────────────────────
 
     private fun hookMediaSession() {
-        "android.media.session.MediaSession".toClass().resolve().apply {
-            // 播放状态
-            firstMethod {
-                name = "setPlaybackState"
-                parameters(PlaybackState::class.java)
-            }.hook {
-                after {
-                    val state = args[0] as? PlaybackState
-                    provider?.player?.setPlaybackState(state)
-                }
-            }
+        // 系统 MediaSession
+        tryHookSetMetadata(
+            "android.media.session.MediaSession",
+            "android.media.MediaMetadata"
+        )
+        // MediaSessionCompat（Symfonium 新版可能使用）
+        tryHookSetMetadata(
+            "android.support.v4.media.session.MediaSessionCompat",
+            "android.support.v4.media.MediaMetadataCompat"
+        )
+    }
 
-            // 轨道元数据: 从这里获取 title、artist、duration、mediaId
-            firstMethod {
-                name = "setMetadata"
-                parameters("android.media.MediaMetadata")
-            }.hook {
-                after {
-                    val metadata = args[0] as? MediaMetadata ?: return@after
-                    handleMetadataChange(metadata)
+    private fun tryHookSetMetadata(className: String, metadataClass: String) {
+        try {
+            className.toClass().resolve().apply {
+                // 播放状态
+                try {
+                    firstMethod { name = "setPlaybackState" }.hook { }
+                } catch (_: Exception) {}
+
+                // 轨道元数据
+                firstMethod {
+                    name = "setMetadata"
+                    parameters(metadataClass)
+                }.hook {
+                    after {
+                        val metadata = args[0] ?: return@after
+                        handleMetadataChange(metadata)
+                    }
                 }
             }
+            YLog.info(tag = tag, msg = "Hooked $className")
+        } catch (e: Exception) {
+            YLog.warn(tag = tag, msg = "Cannot hook $className: ${e.message}")
         }
     }
 
-    private fun handleMetadataChange(metadata: MediaMetadata) {
-        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
-        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
-        val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
-        val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
+    private fun handleMetadataChange(metadata: Any) {
+        val title = metadata.getString("android.media.MediaMetadata", "METADATA_KEY_TITLE")
+        val artist = metadata.getString("android.media.MediaMetadata", "METADATA_KEY_ARTIST")
+        val duration = metadata.getLong("android.media.MediaMetadata", "METADATA_KEY_DURATION")
+        val mediaId = metadata.getString("android.media.MediaMetadata", "METADATA_KEY_MEDIA_ID")
 
         if (title.isNullOrBlank()) return
 
-        // 去重
         val trackId = mediaId ?: title
         if (trackId == currentMediaId) return
         currentMediaId = trackId
 
         YLog.debug(tag = tag, msg = "Metadata: $title - $artist [id=$mediaId]")
 
-        // 异步处理歌词
         trackProcessingJob?.cancel()
         trackProcessingJob = scope.launch {
             handleTrackData(title, artist, duration, mediaId)
         }
+    }
+
+    // 反射工具：兼容 MediaMetadata 和 MediaMetadataCompat
+    private fun Any.getString(className: String, keyName: String): String? {
+        return try {
+            val key = Class.forName(className).getDeclaredField(keyName).get(null) as String
+            javaClass.getMethod("getString", String::class.java).invoke(this, key) as? String
+        } catch (e: Exception) { null }
+    }
+
+    private fun Any.getLong(className: String, keyName: String): Long {
+        return try {
+            val key = Class.forName(className).getDeclaredField(keyName).get(null) as String
+            javaClass.getMethod("getLong", String::class.java).invoke(this, key) as? Long ?: 0L
+        } catch (e: Exception) { 0L }
     }
 
     // ──────────────────────────────────────────────
