@@ -15,7 +15,6 @@ import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
 import com.highcapable.yukihookapi.hook.log.YLog
 import com.kyant.taglib.TagLib
 import io.github.proify.lrckit.EnhanceLrcParser
-import io.github.proify.lyricon.lyric.model.RichLyricLine
 import io.github.proify.lyricon.lyric.model.Song
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.LyriconProvider
@@ -27,14 +26,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Collections
-import java.util.LinkedHashMap
 
 /**
  * Symfonium 播放器的 Lyricon 适配钩子实现类.
  *
- * Hook MediaSession.setMetadata 获取轨道元数据,
- * 从音频文件内嵌标签读取歌词并推送至 Lyricon 服务.
+ * 参考 PowerAmp 实现: Hook MediaSession.setMetadata 获取轨道元数据,
+ * 从音频文件内嵌标签读取歌词, 失败时回退到网络搜索.
  */
 open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
 
@@ -47,27 +44,29 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
 
     private var currentMediaId: String? = null
 
-    /** LRU 缓存 */
-    private val lyricCache = Collections.synchronizedMap(object :
-        LinkedHashMap<String, List<RichLyricLine>?>(8, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<RichLyricLine>?>?): Boolean {
-            return size > 16
-        }
-    })
-
     override fun onHook() {
+        YLog.debug(tag = tag, msg = "Starting Symfonium hook integration...")
+
         onAppLifecycle {
-            onCreate { initProvider(this) }
+            onCreate {
+                initProvider(this)
+            }
             onTerminate {
                 provider?.unregister()
                 scope.cancel()
             }
         }
+
         hookMediaSession()
     }
 
+    // ──────────────────────────────────────────────
+    // MediaSession Hook: 播放状态 + 轨道元数据
+    // ──────────────────────────────────────────────
+
     private fun hookMediaSession() {
         "android.media.session.MediaSession".toClass().resolve().apply {
+            // 播放状态
             firstMethod {
                 name = "setPlaybackState"
                 parameters(PlaybackState::class.java)
@@ -78,6 +77,7 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
                 }
             }
 
+            // 轨道元数据: 从这里获取 title、artist、duration、mediaId
             firstMethod {
                 name = "setMetadata"
                 parameters("android.media.MediaMetadata")
@@ -98,15 +98,23 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
 
         if (title.isNullOrBlank()) return
 
+        // 去重
         val trackId = mediaId ?: title
         if (trackId == currentMediaId) return
         currentMediaId = trackId
 
+        YLog.debug(tag = tag, msg = "Metadata: $title - $artist [id=$mediaId]")
+
+        // 异步处理歌词
         trackProcessingJob?.cancel()
         trackProcessingJob = scope.launch {
             handleTrackData(title, artist, duration, mediaId)
         }
     }
+
+    // ──────────────────────────────────────────────
+    // 歌词处理
+    // ──────────────────────────────────────────────
 
     private suspend fun handleTrackData(
         title: String,
@@ -117,31 +125,28 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         // 先发送基础歌曲信息（清除旧歌词）
         updateSong(Song(name = title, artist = artist, duration = duration, id = mediaId))
 
-        // 缓存命中
-        lyricCache[mediaId]?.let { cached ->
-            if (cached != null) {
-                updateSong(Song(id = mediaId, name = title, artist = artist,
-                    duration = duration, lyrics = cached))
-            }
-            return
-        }
-
-        // 读取内嵌歌词
+        // 尝试通过 mediaId 解析 URI 并读取内嵌歌词
         if (!mediaId.isNullOrBlank()) {
             val uri = tryParseUri(mediaId)
             if (uri != null) {
                 val rawLyric = withContext(Dispatchers.IO) { fetchLyricFromTag(uri) }
-                val lyrics = if (!rawLyric.isNullOrBlank()) {
+                if (!rawLyric.isNullOrBlank()) {
                     val document = EnhanceLrcParser.parse(rawLyric, duration)
-                    document.lines.filter { !it.text.isNullOrBlank() }
-                } else null
-
-                lyricCache[mediaId] = lyrics
-                updateSong(Song(id = mediaId, name = title, artist = artist,
-                    duration = duration, lyrics = lyrics))
+                    val song = Song(
+                        id = mediaId, name = title, artist = artist,
+                        duration = duration,
+                        lyrics = document.lines.filter { !it.text.isNullOrBlank() }
+                    )
+                    updateSong(song)
+                    YLog.info(tag = tag, msg = "Local lyric loaded: $title")
+                }
             }
         }
     }
+
+    // ──────────────────────────────────────────────
+    // 歌词来源 1: 音频文件内嵌标签
+    // ──────────────────────────────────────────────
 
     private fun fetchLyricFromTag(uri: Uri): String? = try {
         appContext?.contentResolver?.openFileDescriptor(uri, "r")?.use { pfd ->
@@ -156,6 +161,10 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         null
     }
 
+    // ──────────────────────────────────────────────
+    // 工具方法
+    // ──────────────────────────────────────────────
+
     private fun tryParseUri(mediaId: String?): Uri? {
         if (mediaId.isNullOrBlank()) return null
         return try {
@@ -167,6 +176,10 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         provider?.player?.setSong(song)
     }
 
+    // ──────────────────────────────────────────────
+    // LyriconProvider 初始化
+    // ──────────────────────────────────────────────
+
     private fun initProvider(context: Context) {
         provider = LyriconFactory.createProvider(
             context = context,
@@ -177,5 +190,6 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
             player.setDisplayTranslation(true)
             register()
         }
+        YLog.debug(tag = tag, msg = "LyriconProvider initialized for ${context.packageName}")
     }
 }
