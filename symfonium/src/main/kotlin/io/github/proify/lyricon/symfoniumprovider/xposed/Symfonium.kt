@@ -39,7 +39,7 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
 
     private val lyricTagRegex by lazy { Regex("(?i)\\b(LYRICS)\\b") }
     private val metaLineRegex by lazy {
-        Regex("""(?:^[曲词编和声混音母带制作推广出品宣传统筹发行录音].*[:：])|(?:版权所有|未经许可|^\s*[-–—]\s*$)""")
+        Regex("""^\s*\[[\d.:]+\]\s*(?:[曲词编和声混音母带制作推广出品宣传统筹发行录音].*[:：]|版权所有|未经许可|[0-9]+.*[:：]|[-–—]+)\s*$""")
     }
 
     private var provider: LyriconProvider? = null
@@ -130,13 +130,14 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
 
     private suspend fun loadLyrics(mediaId: String, duration: Long): List<RichLyricLine>? {
         val raw = readTagFromUri(mediaId) ?: return null
+        // 解析前过滤元数据行，确保 finalize 的时间轴连续
+        val cleaned = raw.lineSequence()
+            .filter { it.isNotBlank() && !metaLineRegex.containsMatchIn(it.trim()) }
+            .joinToString("\n")
         return withContext(Dispatchers.Default) {
-            EnhanceLrcParser.parse(raw, duration)
+            EnhanceLrcParser.parse(cleaned, duration)
                 .lines
-                .filter { line ->
-                    val text = line.text
-                    !text.isNullOrBlank() && !metaLineRegex.containsMatchIn(text)
-                }
+                .filter { !it.text.isNullOrBlank() }
         }
     }
 
