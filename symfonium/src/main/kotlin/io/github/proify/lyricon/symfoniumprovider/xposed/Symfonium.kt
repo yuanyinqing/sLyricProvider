@@ -49,17 +49,50 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
     })
 
     override fun onHook() {
-        YLog.info(tag = tag, msg = "Symfonium provider starting, process=$processName")
+        try {
+            YLog.warn(tag = tag, msg = "=== Symfonium onHook entering, process=$processName ===")
 
-        onAppLifecycle {
-            onCreate { initProvider(this) }
-            onTerminate {
-                provider?.unregister()
-                scope.cancel()
+            onAppLifecycle {
+                onCreate {
+                    YLog.warn(tag = tag, msg = "=== Symfonium app onCreate ===")
+                    initProvider(this)
+                }
+                onTerminate {
+                    YLog.warn(tag = tag, msg = "=== Symfonium app onTerminate ===")
+                    provider?.unregister()
+                    scope.cancel()
+                }
+            }
+
+            // 诊断：hook ExoPlayer.play() 验证 hook 机制
+            tryDiagnosticHook()
+
+            hookMediaSessionRaw()
+        } catch (e: Throwable) {
+            YLog.error(tag = tag, msg = "onHook crashed", e = e)
+        }
+    }
+
+    private fun tryDiagnosticHook() {
+        val targets = listOf(
+            "androidx.media3.exoplayer.ExoPlayer" to "play",
+            "androidx.media3.exoplayer.ExoPlayer" to "setMediaItem",
+            "androidx.media3.exoplayer.ExoPlayer" to "prepare",
+            "androidx.media3.common.Player" to "play",
+        )
+        for ((cls, method) in targets) {
+            try {
+                val c = XposedHelpers.findClass(cls, appContext?.classLoader)
+                XposedBridge.hookAllMethods(c, method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        YLog.warn(tag = tag, msg = ">>> $cls.$method called")
+                    }
+                })
+                YLog.warn(tag = tag, msg = "Diag hooked: $cls.$method")
+            } catch (e: Exception) {
+                YLog.warn(tag = tag, msg = "Diag FAIL: $cls.$method - ${e.message}")
             }
         }
-
-        hookMediaSessionRaw()
     }
 
     // ── 直接用 XposedBridge hook，绕过 KavaRef 兼容层 ──
