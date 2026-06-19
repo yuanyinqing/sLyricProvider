@@ -65,35 +65,49 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
     // ── 直接用 XposedBridge hook，绕过 KavaRef 兼容层 ──
 
     private fun hookMediaSessionRaw() {
-        // 系统类用 boot classloader (null)，support 库用 app classloader
-        val targets = listOf(
-            "android.media.session.MediaSession" to null,
-            "android.support.v4.media.session.MediaSessionCompat" to appContext?.classLoader
+        // 1. 系统 MediaSession（旧版）
+        tryHookSetMetadata(
+            "android.media.session.MediaSession", null,
+            "setMetadata", "android.media.MediaMetadata"
         )
+        // 2. MediaSessionCompat
+        tryHookSetMetadata(
+            "android.support.v4.media.session.MediaSessionCompat", appContext?.classLoader,
+            "setMetadata", "android.support.v4.media.MediaMetadataCompat"
+        )
+        // 3. Media3 MediaSession（Symfonium 实际使用）
+        tryHookSetMetadata(
+            "androidx.media3.session.MediaSession", appContext?.classLoader,
+            "setMediaMetadata", "androidx.media3.common.MediaMetadata"
+        )
+    }
 
-        for ((clsName, loader) in targets) {
-            try {
-                val cls = XposedHelpers.findClass(clsName, loader)
-                XposedBridge.hookAllMethods(cls, "setMetadata", object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val metadata = param.args.firstOrNull() ?: return
-                        onMetadataChanged(metadata)
-                    }
-                })
-                YLog.info(tag = tag, msg = "Raw hooked $clsName.setMetadata")
-            } catch (e: Exception) {
-                YLog.warn(tag = tag, msg = "Cannot hook $clsName: ${e.message}")
-            }
+    private fun tryHookSetMetadata(
+        className: String, classLoader: ClassLoader?,
+        methodName: String, paramClassName: String
+    ) {
+        try {
+            val cls = XposedHelpers.findClass(className, classLoader)
+            val paramCls = XposedHelpers.findClass(paramClassName, classLoader)
+            XposedHelpers.findAndHookMethod(cls, methodName, paramCls, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val metadata = param.args.firstOrNull() ?: return
+                    onMetadataChanged(metadata)
+                }
+            })
+            YLog.info(tag = tag, msg = "Hooked $className.$methodName($paramClassName)")
+        } catch (e: Exception) {
+            YLog.warn(tag = tag, msg = "Cannot hook $className: ${e.message}")
         }
     }
 
-    // ── 元数据处理（反射兼容多种 Metadata 类型）──
+    // ── 元数据处理（兼容 MediaMetadata / MediaMetadataCompat / Media3.MediaMetadata）──
 
     private fun onMetadataChanged(metadata: Any) {
-        val title = getMetaString(metadata, "METADATA_KEY_TITLE")
-        val artist = getMetaString(metadata, "METADATA_KEY_ARTIST")
-        val duration = getMetaLong(metadata, "METADATA_KEY_DURATION")
-        val mediaId = getMetaString(metadata, "METADATA_KEY_MEDIA_ID")
+        val title = extractTitle(metadata)
+        val artist = extractArtist(metadata)
+        val duration = extractDuration(metadata)
+        val mediaId = extractMediaId(metadata)
 
         if (title.isNullOrBlank()) return
 
@@ -109,23 +123,49 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         }
     }
 
-    private fun getMetaString(metadata: Any, keyName: String): String? {
+    private fun extractTitle(metadata: Any): String? {
+        return tryField(metadata, "title")?.toString()
+            ?: tryKey(metadata, "android.media.MediaMetadata", "METADATA_KEY_TITLE")
+    }
+
+    private fun extractArtist(metadata: Any): String? {
+        return tryField(metadata, "artist")?.toString()
+            ?: tryKey(metadata, "android.media.MediaMetadata", "METADATA_KEY_ARTIST")
+    }
+
+    private fun extractDuration(metadata: Any): Long {
+        val d = tryField(metadata, "durationMs")
+        if (d is Long) return d
+        return tryKeyLong(metadata, "android.media.MediaMetadata", "METADATA_KEY_DURATION")
+    }
+
+    private fun extractMediaId(metadata: Any): String? {
+        val id = tryField(metadata, "mediaId")?.toString()
+        if (!id.isNullOrBlank()) return id
+        val uri = tryField(metadata, "mediaUri")?.toString()
+        if (!uri.isNullOrBlank()) return uri
+        return tryKey(metadata, "android.media.MediaMetadata", "METADATA_KEY_MEDIA_ID")
+    }
+
+    // 尝试直接字段（Media3 风格）
+    private fun tryField(obj: Any, fieldName: String): Any? {
         return try {
-            val cls = if (keyName.startsWith("METADATA_KEY")) {
-                Class.forName("android.media.MediaMetadata")
-            } else {
-                metadata.javaClass
-            }
-            val key = cls.getDeclaredField(keyName).get(null) as String
-            metadata.javaClass.getMethod("getString", String::class.java).invoke(metadata, key) as? String
+            obj.javaClass.getDeclaredField(fieldName).apply { isAccessible = true }.get(obj)
         } catch (e: Exception) { null }
     }
 
-    private fun getMetaLong(metadata: Any, keyName: String): Long {
+    // 尝试 key-value getter（系统 MediaMetadata 风格）
+    private fun tryKey(obj: Any, metadataClassName: String, keyName: String): String? {
         return try {
-            val cls = Class.forName("android.media.MediaMetadata")
-            val key = cls.getDeclaredField(keyName).get(null) as String
-            metadata.javaClass.getMethod("getLong", String::class.java).invoke(metadata, key) as? Long ?: 0L
+            val key = Class.forName(metadataClassName).getDeclaredField(keyName).get(null) as String
+            obj.javaClass.getMethod("getString", String::class.java).invoke(obj, key) as? String
+        } catch (e: Exception) { null }
+    }
+
+    private fun tryKeyLong(obj: Any, metadataClassName: String, keyName: String): Long {
+        return try {
+            val key = Class.forName(metadataClassName).getDeclaredField(keyName).get(null) as String
+            obj.javaClass.getMethod("getLong", String::class.java).invoke(obj, key) as? Long ?: 0L
         } catch (e: Exception) { 0L }
     }
 
