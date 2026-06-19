@@ -110,6 +110,12 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         searchOnline(title, artist, duration, mediaId)
     }
 
+    private val metaLinePattern by lazy {
+        Regex("""(?:[曲词编和声混音母带制作推广出品宣传统筹发行录音].*[:：])|(?:版权所有|未经许可)""")
+    }
+
+    // ...
+
     private suspend fun searchOnline(
         title: String, artist: String?, duration: Long, mediaId: String
     ) {
@@ -118,10 +124,15 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
                 trackName = title
                 artistName = artist ?: ""
             })
-            val lyric = results.firstOrNull()?.lyrics?.rich ?: return
+            val rawLines = results.firstOrNull()?.lyrics?.rich ?: return
+            // 过滤元数据行（词曲编等信息），避免滚动卡死
+            val lines = rawLines.filter { line ->
+                val text = line.text
+                text != null && !metaLinePattern.containsMatchIn(text)
+            }
             if (mediaId != currentMediaId) return
             updateSong(Song(id = mediaId, name = title, artist = artist,
-                duration = duration, lyrics = lyric))
+                duration = duration, lyrics = lines))
         } catch (e: Exception) {
             YLog.error(tag = tag, msg = "Online search failed: $title", e = e)
         }
