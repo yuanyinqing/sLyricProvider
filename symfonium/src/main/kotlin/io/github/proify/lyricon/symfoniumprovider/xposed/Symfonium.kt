@@ -6,6 +6,8 @@
 
 package io.github.proify.lyricon.symfoniumprovider.xposed
 
+import android.app.Notification
+import android.app.NotificationManager
 import android.media.MediaMetadata
 import android.media.session.PlaybackState
 import android.net.Uri
@@ -46,6 +48,31 @@ class Symfonium : YukiBaseHooker() {
         }
 
         hookMediaSession()
+        hookNotification()
+    }
+
+    // ── Notification fallback ──────────────────────────────────────────────
+    // Some music apps put lyrics in the notification extra fields.  We
+    // log the notification title / text for diagnostic purposes.
+    private fun hookNotification() {
+        NotificationManager::class.java.name.toClass()
+            .resolve()
+            .apply {
+                firstMethod {
+                    name = "notify"
+                    parameters(String::class, Int::class, Notification::class)
+                }.hook {
+                    after {
+                        val n = args[2] as? Notification ?: return@after
+                        val ticker = n.tickerText?.toString()
+                        val title = n.extras?.getString(Notification.EXTRA_TITLE)
+                        val text  = n.extras?.getString(Notification.EXTRA_TEXT)
+                        if (ticker != null || title != null || text != null) {
+                            YLog.debug(tag = TAG, msg = "notify ticker=[$ticker] title=[$title] text=[$text]")
+                        }
+                    }
+                }
+            }
     }
 
     // ── MediaSession Hook ─────────────────────────────────────────────────
@@ -90,6 +117,17 @@ class Symfonium : YukiBaseHooker() {
         val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
         val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
 
+        // ── Debug: dump ALL metadata keys ───────────────────────────────
+        val allKeys = metadata.keySet().joinToString(" | ") { key ->
+            val short = key.substringAfterLast('.')
+            val v = metadata.getString(key)
+                ?: runCatching { metadata.getLong(key).toString() }.getOrNull()
+                ?: runCatching { metadata.getBitmap(key)?.let { "Bitmap(${it.width}x${it.height})" } }.getOrNull()
+                ?: "?"
+            "$short=$v"
+        }
+        YLog.debug(tag = TAG, msg = "meta: $allKeys")
+
         if (title.isNullOrBlank()) return
 
         // ── Bluetooth-lyrics capture ────────────────────────────────────
@@ -99,21 +137,22 @@ class Symfonium : YukiBaseHooker() {
         // (no change → sendText called at most once per track).
         if (title != lastSentText) {
             lastSentText = title
+            YLog.debug(tag = TAG, msg = "sendText: $title")
             lyriconProvider?.player?.sendText(title)
         }
 
         // ── Track-level dedup (setSong path only) ───────────────────────
-        // Use mediaId as the dedup key.  When mediaId is absent (streaming)
-        // we only deliver lyrics via sendText() above — there is no
-        // content URI to read embedded tags from anyway.
         if (mediaId != null && mediaId == currentMediaId) return
         currentMediaId = mediaId
 
-        YLog.debug(tag = TAG, msg = "metadata: $title - $artist [id=$mediaId]")
+        YLog.info(tag = TAG, msg = "new track: $title - $artist [id=$mediaId]")
 
         // ── Attempt embedded LRC via mediaId ────────────────────────────
         val uri = tryParseUri(mediaId)
         val rawLyric = if (uri != null) fetchLyricFromTag(uri) else null
+        if (rawLyric != null) {
+            YLog.info(tag = TAG, msg = "embedded LRC found: ${rawLyric.take(80)}...")
+        }
         val document = EnhanceLrcParser.parse(rawLyric, duration)
 
         val song = Song(
