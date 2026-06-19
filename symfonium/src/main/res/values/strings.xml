@@ -7,6 +7,6 @@
 <resources>
     <string name="app_name">Symfonium Server</string>
 
-    <string name="xposed_description">Provide Symfonium lyrics for lyricon</string>
-    <string name="lyricon_module_description">Only supports local music. Supports enhanced lyrics</string>
+    <string name="xposed_description">Provide Symfonium lyrics (local + Bluetooth) for lyricon</string>
+    <string name="lyricon_module_description">Supports local embedded lyrics and Bluetooth lyrics (AVRCP TITLE). Works with streaming (Jellyfin/Navidrome). Supports enhanced lyrics</string>
 </resources>

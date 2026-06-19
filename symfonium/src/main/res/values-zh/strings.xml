@@ -7,6 +7,6 @@
 <resources>
     <string name="app_name">Symfonium 歌词支持</string>
 
-    <string name="xposed_description">为词幕提供 Symfonium 歌词</string>
-    <string name="lyricon_module_description">仅支持本地音乐。支持增强型逐字歌词</string>
+    <string name="xposed_description">为词幕提供 Symfonium 歌词（本地 + 蓝牙歌词）</string>
+    <string name="lyricon_module_description">支持本地内嵌歌词和蓝牙歌词（AVRCP TITLE 通道）。支持流媒体（Jellyfin/Navidrome）。支持增强型逐字歌词</string>
 </resources>
