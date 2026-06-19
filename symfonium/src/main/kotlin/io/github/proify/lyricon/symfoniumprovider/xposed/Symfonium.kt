@@ -100,25 +100,24 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         if (mediaId == currentMediaId) return
         currentMediaId = mediaId
 
-        // 先推送基础歌曲信息（清除旧歌词）
-        provider?.player?.setSong(
-            Song(name = title, artist = artist, duration = duration, id = mediaId)
-        )
-
-        // 缓存命中直接使用
-        lyricCache[mediaId]?.let { cached ->
-            if (cached != null) {
-                provider?.player?.setSong(
-                    Song(id = mediaId, name = title, artist = artist,
-                        duration = duration, lyrics = cached)
-                )
-            }
-            return
-        }
-
-        // 异步加载歌词
         trackJob?.cancel()
         trackJob = scope.launch {
+            // 先推送基础歌曲信息（清除旧歌词）
+            provider?.player?.setSong(
+                Song(name = title, artist = artist, duration = duration, id = mediaId)
+            )
+
+            // 缓存命中直接使用
+            lyricCache[mediaId]?.let { cached ->
+                if (cached != null) {
+                    provider?.player?.setSong(
+                        Song(id = mediaId, name = title, artist = artist,
+                            duration = duration, lyrics = cached)
+                    )
+                }
+                return@launch
+            }
+
             val uri = tryParseUri(mediaId)
             val raw = if (uri != null) readTagFromUri(uri) else null
 
