@@ -27,6 +27,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Collections
 import java.util.LinkedHashMap
 
 /**
@@ -38,9 +39,6 @@ import java.util.LinkedHashMap
 open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
 
     private val lyricTagRegex by lazy { Regex("(?i)\\b(LYRICS)\\b") }
-    private val metaLineRegex by lazy {
-        Regex("""^\s*\[[\d.:]+\]\s*(?:[曲词编和声混音母带制作推广出品宣传统筹发行录音].*[:：]|版权所有|未经许可|[0-9]+.*[:：]|[-–—]+)\s*$""")
-    }
 
     private var provider: LyriconProvider? = null
 
@@ -49,16 +47,16 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
 
     private var currentMediaId: String? = null
 
-    /** LRU 缓存: mediaId → parsed lyrics, 避免重复读文件+解析 */
-    private val lyricCache = object : LinkedHashMap<String, List<RichLyricLine>?>(8, 0.75f, true) {
+    /** 线程安全 LRU 缓存: mediaId → parsed lyrics */
+    @Synchronized
+    private val lyricCache = Collections.synchronizedMap(object :
+        LinkedHashMap<String, List<RichLyricLine>?>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<RichLyricLine>?>?): Boolean {
             return size > 16
         }
-    }
+    })
 
     override fun onHook() {
-        YLog.debug(tag = tag, msg = "Starting Symfonium hook integration...")
-
         onAppLifecycle {
             onCreate { initProvider(this) }
             onTerminate {
@@ -66,7 +64,6 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
                 scope.cancel()
             }
         }
-
         hookMediaSession()
     }
 
@@ -104,45 +101,51 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
         if (mediaId == currentMediaId) return
         currentMediaId = mediaId
 
-        // 先清除旧歌词，再异步加载
-        provider?.player?.setSong(Song(name = title, artist = artist, duration = duration, id = mediaId))
+        // 先推送基础歌曲信息（清除旧歌词）
+        provider?.player?.setSong(
+            Song(name = title, artist = artist, duration = duration, id = mediaId)
+        )
 
-        // 命中缓存直接使用
+        // 缓存命中直接使用
         lyricCache[mediaId]?.let { cached ->
-            provider?.player?.setSong(
-                Song(id = mediaId, name = title, artist = artist, duration = duration, lyrics = cached)
-            )
+            if (cached != null) {
+                provider?.player?.setSong(
+                    Song(id = mediaId, name = title, artist = artist,
+                        duration = duration, lyrics = cached)
+                )
+            }
             return
         }
 
-        // 异步读取内嵌标签
+        // 异步加载歌词
         trackJob?.cancel()
         trackJob = scope.launch {
-            val lyrics = loadLyrics(mediaId, duration)
+            val uri = tryParseUri(mediaId)
+            val raw = if (uri != null) readTagFromUri(uri) else null
+
+            val lyrics = if (!raw.isNullOrBlank()) {
+                withContext(Dispatchers.Default) {
+                    EnhanceLrcParser.parse(raw, duration)
+                        .lines
+                        .filter { !it.text.isNullOrBlank() }
+                }
+            } else null
+
             lyricCache[mediaId] = lyrics
             provider?.player?.setSong(
-                Song(id = mediaId, name = title, artist = artist, duration = duration, lyrics = lyrics)
+                Song(id = mediaId, name = title, artist = artist,
+                    duration = duration, lyrics = lyrics)
             )
         }
     }
 
     // ── 歌词读取 ──────────────────────────────────
 
-    private suspend fun loadLyrics(mediaId: String, duration: Long): List<RichLyricLine>? {
-        val raw = readTagFromUri(mediaId) ?: return null
-        // 解析前过滤元数据行，确保 finalize 的时间轴连续
-        val cleaned = raw.lineSequence()
-            .filter { it.isNotBlank() && !metaLineRegex.containsMatchIn(it.trim()) }
-            .joinToString("\n")
-        return withContext(Dispatchers.Default) {
-            EnhanceLrcParser.parse(cleaned, duration)
-                .lines
-                .filter { !it.text.isNullOrBlank() }
-        }
+    private fun tryParseUri(mediaId: String): Uri? {
+        return try { Uri.parse(mediaId) } catch (_: Exception) { null }
     }
 
-    private suspend fun readTagFromUri(mediaId: String): String? {
-        val uri = try { Uri.parse(mediaId) } catch (_: Exception) { null } ?: return null
+    private fun readTagFromUri(uri: Uri): String? {
         return try {
             appContext?.contentResolver?.openFileDescriptor(uri, "r")?.use { pfd ->
                 TagLib.getMetadata(pfd.dup().detachFd())?.let { metadata ->
