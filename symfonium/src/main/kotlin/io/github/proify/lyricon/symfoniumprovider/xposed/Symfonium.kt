@@ -125,16 +125,9 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
                 artistName = artist ?: ""
             })
             val rawLines = results.firstOrNull()?.lyrics?.rich ?: return
-            // 过滤元数据行，然后重算 end 保证时间轴连续
             val lines = rawLines.filter { line ->
                 val text = line.text
                 text != null && !metaLinePattern.containsMatchIn(text)
-            }.sortedBy { it.begin }
-            // 重算 end：每个行 end = 下一行 begin，最后一行用歌曲时长
-            lines.forEachIndexed { i, line ->
-                val next = lines.getOrNull(i + 1)
-                line.end = next?.begin ?: duration
-                line.duration = (line.end - line.begin).coerceAtLeast(0)
             }
             if (mediaId != currentMediaId) return
             updateSong(Song(id = mediaId, name = title, artist = artist,
