@@ -80,7 +80,9 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
             className.toClass().resolve().apply {
                 // 播放状态
                 try {
-                    firstMethod { name = "setPlaybackState" }.hook { }
+                    firstMethod { name = "setPlaybackState" }.hook {
+                        after { }
+                    }
                 } catch (_: Exception) {}
 
                 // 轨道元数据
