@@ -73,6 +73,7 @@ dependencies {
     implementation(libs.yukihookapi.api)
     implementation(libs.kavaref.core)
     implementation(libs.kavaref.extension)
+    implementation(libs.kotlinx.coroutines.core)
     compileOnly(libs.xposed.api)
     ksp(libs.yukihookapi.ksp.xposed)
 
