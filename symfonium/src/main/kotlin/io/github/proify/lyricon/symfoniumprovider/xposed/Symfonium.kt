@@ -48,7 +48,6 @@ open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
     private var currentMediaId: String? = null
 
     /** 线程安全 LRU 缓存: mediaId → parsed lyrics */
-    @Synchronized
     private val lyricCache = Collections.synchronizedMap(object :
         LinkedHashMap<String, List<RichLyricLine>?>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<RichLyricLine>?>?): Boolean {
