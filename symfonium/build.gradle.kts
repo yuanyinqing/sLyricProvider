@@ -21,8 +21,8 @@ configure<ApplicationExtension> {
         applicationId = "io.github.proify.lyricon.symfoniumprovider"
         minSdk = 27
         targetSdk = rootProject.extra.get("targetSdkVersion") as Int
-        versionCode = 12
-        versionName = "1.0.12"
+        versionCode = 1
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -61,7 +61,6 @@ configure<ApplicationExtension> {
 }
 
 dependencies {
-    implementation(project(":share:cloudlyric"))
     implementation(project(":share:extensions-android"))
     implementation(project(":share:lrckit"))
     implementation(project(":share:krckit"))
@@ -74,7 +73,6 @@ dependencies {
     implementation(libs.yukihookapi.api)
     implementation(libs.kavaref.core)
     implementation(libs.kavaref.extension)
-    implementation(libs.kotlinx.coroutines.core)
     compileOnly(libs.xposed.api)
     ksp(libs.yukihookapi.ksp.xposed)
 

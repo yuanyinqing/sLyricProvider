@@ -6,177 +6,146 @@
 
 package io.github.proify.lyricon.symfoniumprovider.xposed
 
-import android.content.Context
+import android.media.MediaMetadata
+import android.media.session.PlaybackState
 import android.net.Uri
+import com.highcapable.kavaref.KavaRef.Companion.resolve
 import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
 import com.highcapable.yukihookapi.hook.log.YLog
 import com.kyant.taglib.TagLib
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedHelpers
-import io.github.proify.cloudlyric.CloudLyrics
-import io.github.proify.cloudlyric.SearchOptions
-import io.github.proify.cloudlyric.provider.lrclib.LrcLibProvider
-import io.github.proify.cloudlyric.provider.qq.QQMusicProvider
-import io.github.proify.extensions.isChinese
 import io.github.proify.lrckit.EnhanceLrcParser
-import io.github.proify.lyricon.lyric.model.RichLyricLine
 import io.github.proify.lyricon.lyric.model.Song
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.LyriconProvider
 import io.github.proify.lyricon.provider.ProviderLogo
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.util.Locale
 
-open class Symfonium(val tag: String = "SymfoniumProvider") : YukiBaseHooker() {
+class Symfonium : YukiBaseHooker() {
+    companion object {
+        const val TAG: String = "Symfonium"
+    }
 
+    private var lyriconProvider: LyriconProvider? = null
     private val lyricTagRegex by lazy { Regex("(?i)\\b(LYRICS)\\b") }
 
-    private var provider: LyriconProvider? = null
+    private var currentMediaUri: Uri? = null
+    private var currentMediaMetadata: MediaMetadata? = null
+    private var currentSong: Song? = null
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var trackJob: Job? = null
-    private var currentMediaId: String? = null
+    override fun onHook() {
+        YLog.debug(tag = TAG, msg = "进程: $packageName/$processName")
 
-    private val cloudLyrics by lazy {
-        CloudLyrics(
-            if (Locale.getDefault().isChinese()) listOf(QQMusicProvider())
-            else listOf(LrcLibProvider())
+        onAppLifecycle {
+            onCreate {
+                initProvider()
+            }
+        }
+        hookMediaSession()
+
+        Uri::class.java.name.toClass()
+            .resolve().apply {
+
+                firstMethod {
+                    name = "parse"
+                    parameters(String::class.java)
+                }.hook {
+                    after {
+                        val uri = args[0] as String
+                        if (!uri.startsWith("content://media/external/audio/")) {
+                            return@after
+                        }
+
+                        val result = this.result as Uri
+                        if (currentMediaUri == result) {
+                            //YLog.debug(tag = TAG, msg = "skip same uri: $uri")
+                            return@after
+                        }
+                        YLog.debug(tag = TAG, msg = "load uri: $uri")
+                        currentMediaUri = result
+
+                        val lyric = fetchLyricFromTag(result)
+                        setLyric(uri, lyric)
+                    }
+                }
+            }
+
+    }
+
+    private fun setLyric(id: String, lyric: String?) {
+        val document = EnhanceLrcParser.parse(lyric)
+
+        val name = currentMediaMetadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
+        val artist = currentMediaMetadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+
+        setSong(
+            Song(
+                id = id,
+                name = name,
+                artist = artist,
+                lyrics = document.lines
+            )
         )
     }
 
-    override fun onHook() {
-        onAppLifecycle {
-            onCreate { initProvider(this) }
-            onTerminate {
-                provider?.unregister()
-                scope.cancel()
-            }
+    private fun setSong(song: Song) {
+        if (currentSong == song) {
+            YLog.debug(tag = TAG, msg = "skip same song: ${song.name}")
+            return
         }
-        // 只 hook 系统 MediaSession，Symfonium 确认使用这个
-        try {
-            val cls = XposedHelpers.findClass("android.media.session.MediaSession", null)
-            XposedHelpers.findAndHookMethod(cls, "setMetadata",
-                XposedHelpers.findClass("android.media.MediaMetadata", null),
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        onMetadataChanged(param.args[0])
-                    }
-                })
-        } catch (e: Exception) {
-            YLog.error(tag = tag, msg = "Failed to hook MediaSession", e = e)
-        }
-    }
-
-    private fun onMetadataChanged(metadata: Any) {
-        val title = getMetaString(metadata, "METADATA_KEY_TITLE") ?: return
-        val artist = getMetaString(metadata, "METADATA_KEY_ARTIST")
-        val duration = getMetaLong(metadata, "METADATA_KEY_DURATION")
-        val mediaId = getMetaString(metadata, "METADATA_KEY_MEDIA_ID") ?: title
-
-        val trackId = mediaId
-        if (trackId == currentMediaId) return
-        currentMediaId = trackId
-
-        trackJob?.cancel()
-        trackJob = scope.launch { handleTrackData(title, artist, duration, mediaId) }
-    }
-
-    private suspend fun handleTrackData(
-        title: String, artist: String?, duration: Long, mediaId: String
-    ) {
-        // 先清除旧歌词
-        updateSong(Song(name = title, artist = artist, duration = duration, id = mediaId))
-
-        // 1. 尝试本地标签（仅当 mediaId 是合法 URI）
-        val uri = tryParseUri(mediaId)
-        if (uri != null) {
-            val raw = withContext(Dispatchers.IO) { fetchLyricFromTag(uri) }
-            if (!raw.isNullOrBlank()) {
-                val doc = EnhanceLrcParser.parse(raw, duration)
-                val lines = doc.lines.filter { !it.text.isNullOrBlank() }
-                updateSong(Song(id = mediaId, name = title, artist = artist,
-                    duration = duration, lyrics = lines))
-                return
-            }
-        }
-
-        // 2. 网络搜索（Symfonium 的主要歌词来源）
-        searchOnline(title, artist, duration, mediaId)
-    }
-
-    private val metaLinePattern by lazy {
-        Regex("""(?:[曲词编和声混音母带制作推广出品宣传统筹发行录音].*[:：])|(?:版权所有|未经许可)""")
-    }
-
-    // ...
-
-    private suspend fun searchOnline(
-        title: String, artist: String?, duration: Long, mediaId: String
-    ) {
-        try {
-            val results = cloudLyrics.search(SearchOptions().apply {
-                trackName = title
-                artistName = artist ?: ""
-            })
-            val rawLines = results.firstOrNull()?.lyrics?.rich ?: return
-            val lines = rawLines.filter { line ->
-                val text = line.text
-                text != null && !metaLinePattern.containsMatchIn(text)
-            }
-            if (mediaId != currentMediaId) return
-            updateSong(Song(id = mediaId, name = title, artist = artist,
-                duration = duration, lyrics = lines))
-        } catch (e: Exception) {
-            YLog.error(tag = tag, msg = "Online search failed: $title", e = e)
-        }
+        currentSong = song
+        lyriconProvider?.player?.setSong(song)
     }
 
     private fun fetchLyricFromTag(uri: Uri): String? = try {
         appContext?.contentResolver?.openFileDescriptor(uri, "r")?.use { pfd ->
-            TagLib.getMetadata(pfd.dup().detachFd())?.let { meta ->
-                meta.propertyMap.entries.firstOrNull { (k, _) ->
-                    lyricTagRegex.matches(k)
+            TagLib.getMetadata(pfd.dup().detachFd())?.let { metadata ->
+                metadata.propertyMap.entries.firstOrNull { (key, _) ->
+                    lyricTagRegex.matches(key)
                 }?.value?.firstOrNull()
             }
         }
-    } catch (e: Exception) { null }
-
-    // ── 反射工具 ──
-
-    private fun tryParseUri(id: String): Uri? {
-        if (!id.startsWith("content://") && !id.startsWith("file://")) return null
-        return try { Uri.parse(id) } catch (_: Exception) { null }
+    } catch (e: Exception) {
+        YLog.error(tag = TAG, msg = "Failed to fetch lyric tag from $uri", e = e)
+        null
     }
 
-    private fun getMetaString(obj: Any, keyName: String): String? = try {
-        val key = Class.forName("android.media.MediaMetadata").getDeclaredField(keyName).get(null) as String
-        obj.javaClass.getMethod("getString", String::class.java).invoke(obj, key) as? String
-    } catch (e: Exception) { null }
-
-    private fun getMetaLong(obj: Any, keyName: String): Long = try {
-        val key = Class.forName("android.media.MediaMetadata").getDeclaredField(keyName).get(null) as String
-        obj.javaClass.getMethod("getLong", String::class.java).invoke(obj, key) as? Long ?: 0L
-    } catch (e: Exception) { 0L }
-
-    private fun updateSong(song: Song?) {
-        provider?.player?.setSong(song)
-    }
-
-    private fun initProvider(context: Context) {
-        provider = LyriconFactory.createProvider(
+    private fun initProvider() {
+        val context = appContext ?: return
+        lyriconProvider = LyriconFactory.createProvider(
             context = context,
             providerPackageName = Constants.PROVIDER_PACKAGE_NAME,
             playerPackageName = context.packageName,
             logo = ProviderLogo.fromSvg(Constants.ICON)
-        ).apply {
-            player.setDisplayTranslation(true)
-            register()
+        ).apply { register() }
+    }
+
+    private fun hookMediaSession() {
+        "android.media.session.MediaSession".toClass().resolve().apply {
+            firstMethod {
+                name = "setPlaybackState"
+                parameters(PlaybackState::class.java)
+            }.hook {
+                after {
+                    val state = args[0] as? PlaybackState
+                    lyriconProvider?.player?.setPlaybackState(state)
+                }
+            }
+
+            firstMethod {
+                name = "setMetadata"
+                parameters("android.media.MediaMetadata")
+            }.hook {
+                after {
+                    val metadata = args[0] as? MediaMetadata ?: return@after
+                    if (metadata == currentMediaMetadata) {
+                        // YLog.debug(tag = TAG, msg = "skip same metadata")
+                        return@after
+                    }
+                    val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+                    val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                    YLog.debug(tag = TAG, msg = "set metadata: $title - $artist")
+                    currentMediaMetadata = metadata
+                }
+            }
         }
     }
 }
